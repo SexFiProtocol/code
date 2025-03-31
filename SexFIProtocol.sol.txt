@@ -1,0 +1,405 @@
+SexFIProtocol.sol
+
+
+0xbD914cd0B10A7Fd8540832dB0384E7DFF5F8a26B
+
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.29;
+
+import "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/AddressUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/math/SafeMathUpgradeable.sol";
+import "@openzeppelin/contracts/utils/Strings.sol";
+
+contract SexFiProtocol is
+    Initializable,
+    ERC20Upgradeable,
+    AccessControlUpgradeable,
+    OwnableUpgradeable,
+    PausableUpgradeable,
+    ReentrancyGuardUpgradeable,
+    UUPSUpgradeable
+{
+    using AddressUpgradeable for address;
+    using SafeMathUpgradeable for uint256;
+    using Strings for uint256;
+
+    // ======================
+    // Structures and Variables
+    // ======================
+
+    // Contract addresses
+    address private _miningContractAddress;
+    address private _developmentFundAddress;
+    address private _marketingFundAddress;
+    address private _liquidityPoolAddress;
+    address private _presaleContractAddress;
+    address private _stakeContractAddress;
+    address private _nftContractAddress;
+    address private _governanceContractAddress;
+    address private _donationContractAddress;
+
+    // Supply totals
+    uint256 public constant TOTAL_SUPPLY = 100_000_000 * 10**18;
+    uint256 public constant PRESALE_SUPPLY = 5_000_000 * 10**18;
+    uint256 public constant LIQUIDITY_POOL_SUPPLY = 5_000_000 * 10**18;
+    uint256 public constant DEVELOPMENT_SUPPLY = 2_000_000 * 10**18;
+    uint256 public constant MARKETING_SUPPLY = 7_000_000 * 10**18;
+    uint256 public constant CREATOR_TOTAL_SUPPLY = 2_000_000 * 10**18;
+    uint256 public constant STAKE_SUPPLY = 20_000_000 * 10**18;
+    uint256 public constant NFT_SUPPLY = 1_000_000 * 10**18;
+    uint256 public constant DONATION_SUPPLY = 3_000_000 * 10**18;
+    uint256 public constant MINING_SUPPLY = 55_000_000 * 10**18;
+
+    // Creator distribution
+    uint256 public constant CREATOR_INITIAL_SUPPLY = 500_000 * 10**18;
+    uint256 public constant CREATOR_VESTING_SUPPLY = 500_000 * 10**18;
+    uint256 public constant CREATOR_VESTING_PERIODS = 3;
+    uint256 private _creatorVestingStartTime;
+    uint256 private _creatorVestingCount;
+
+    // Initial distribution control
+    bool private _isInitialSupplyDistributed;
+
+    // Mining control
+    mapping(address => uint256) private _lastMineBlock;
+    mapping(address => uint256) private _lastMineTime;
+    mapping(address => uint256) private _minerContributions;
+    uint256 private _totalMinedTokens;
+    uint256 private _maxTokensPerBlock;
+
+    // Burned tokens tracking
+    uint256 private _burnedSupply;
+
+    // Burn rate
+    uint256 private _burnRate;
+    uint256 public constant MAX_BURN_RATE = 10;
+
+    // Upgrade control
+    mapping(address => bool) private _approvedImplementations;
+    uint256 private _upgradeDelay;
+    mapping(address => uint256) private _upgradeRequestTime;
+    mapping(address => bool) private _upgradeConfirmed;
+
+    // Minimum time between mining attempts
+    uint256 public constant MINING_COOLDOWN = 10 minutes;
+
+    // Events
+    event TokensMined(address indexed miner, uint256 amount);
+    event TokensBurned(address indexed burner, uint256 amount);
+    event InitialSupplyDistributed();
+    event CreatorTokensWithdrawn(address indexed creator, uint256 amount);
+    event ContractAddressUpdated(uint8 contractType, address newAddress);
+    event ImplementationApproved(address indexed implementation);
+    event UpgradeRequested(address indexed newImplementation, uint256 requestTime);
+    event BurnRateUpdated(uint256 newBurnRate);
+    event MaxTokensPerBlockUpdated(uint256 newMaxTokensPerBlock);
+    event AdminAdded(address indexed admin, bytes32 role);
+    event AdminRemoved(address indexed admin, bytes32 role);
+
+    // Access control roles
+    bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
+    bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
+    bytes32 public constant CONFIGURATOR_ROLE = keccak256("CONFIGURATOR_ROLE");
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    // ======================
+    // Modifiers
+    // ======================
+
+    modifier onlyValidAddress(address addr) {
+        require(addr != address(0), "Zero address not allowed");
+        _;
+    }
+
+    modifier onlyContract(address addr) {
+        require(addr.isContract(), "Address must be a contract");
+        _;
+    }
+
+    // ======================
+    // Initialization
+    // ======================
+
+    function initialize() public initializer {
+        __ERC20_init("SexFi Protocol", "SEX");
+        __AccessControl_init();
+        __Ownable_init(msg.sender);
+        __Pausable_init();
+        __ReentrancyGuard_init();
+        __UUPSUpgradeable_init();
+
+        // Grant all roles to creator
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(MINTER_ROLE, msg.sender);
+        _grantRole(PAUSER_ROLE, msg.sender);
+        _grantRole(UPGRADER_ROLE, msg.sender);
+        _grantRole(CONFIGURATOR_ROLE, msg.sender);
+
+        _burnRate = 1;
+        _maxTokensPerBlock = 1000 * 10**18;
+        _upgradeDelay = 1 days;
+
+        _mint(msg.sender, CREATOR_INITIAL_SUPPLY);
+        _creatorVestingStartTime = block.timestamp;
+        _creatorVestingCount = 0;
+    }
+
+    // ======================
+    // Admin Functions
+    // ======================
+
+    /**
+     * @dev Adds a new admin with one or more roles
+     * @param admin Address of new admin
+     * @param roles Array of roles to grant (DEFAULT_ADMIN_ROLE, MINTER_ROLE, etc)
+     */
+    function addAdmin(address admin, bytes32[] memory roles) external onlyOwner {
+        require(admin != address(0), "Invalid address");
+        
+        for (uint i = 0; i < roles.length; i++) {
+            _grantRole(roles[i], admin);
+            emit AdminAdded(admin, roles[i]);
+        }
+    }
+
+    /**
+     * @dev Removes an admin from one or more roles
+     * @param admin Admin address
+     * @param roles Array of roles to revoke
+     */
+    function removeAdmin(address admin, bytes32[] memory roles) external onlyOwner {
+        require(admin != address(0), "Invalid address");
+        require(admin != msg.sender, "Cannot remove yourself");
+
+        for (uint i = 0; i < roles.length; i++) {
+            _revokeRole(roles[i], admin);
+            emit AdminRemoved(admin, roles[i]);
+        }
+    }
+
+    /**
+     * @dev Emergency function to recover all roles
+     * Only owner can call, even if they lost roles
+     */
+    function emergencyRecoverRoles() external onlyOwner {
+        bytes32[] memory allRoles = new bytes32[](4);
+        allRoles[0] = DEFAULT_ADMIN_ROLE;
+        allRoles[1] = MINTER_ROLE;
+        allRoles[2] = PAUSER_ROLE;
+        allRoles[3] = UPGRADER_ROLE;
+
+        for (uint i = 0; i < allRoles.length; i++) {
+            if (!hasRole(allRoles[i], msg.sender)) {
+                _grantRole(allRoles[i], msg.sender);
+            }
+        }
+    }
+
+    // ======================
+    // Distribution Functions
+    // ======================
+
+    function distributeInitialSupply() external onlyRole(CONFIGURATOR_ROLE) nonReentrant {
+        require(!_isInitialSupplyDistributed, "Distribution already done");
+
+        require(_miningContractAddress != address(0), "Mining address not set");
+        require(_developmentFundAddress != address(0), "Development address not set");
+        require(_marketingFundAddress != address(0), "Marketing address not set");
+        require(_liquidityPoolAddress != address(0), "Liquidity address not set");
+        require(_stakeContractAddress != address(0), "Stake address not set");
+        require(_nftContractAddress != address(0), "NFT address not set");
+        require(_donationContractAddress != address(0), "Donation address not set");
+        require(_presaleContractAddress != address(0), "Presale address not set");
+
+        _mint(_developmentFundAddress, DEVELOPMENT_SUPPLY);
+        _mint(_marketingFundAddress, MARKETING_SUPPLY);
+        _mint(_liquidityPoolAddress, LIQUIDITY_POOL_SUPPLY);
+        _mint(_stakeContractAddress, STAKE_SUPPLY);
+        _mint(_nftContractAddress, NFT_SUPPLY);
+        _mint(_donationContractAddress, DONATION_SUPPLY);
+        _mint(_miningContractAddress, MINING_SUPPLY);
+        _mint(_presaleContractAddress, PRESALE_SUPPLY);
+
+        _isInitialSupplyDistributed = true;
+
+        emit InitialSupplyDistributed();
+    }
+
+    // [Rest of the functions remain the same...]
+    // ======================
+    // Mining Functions
+    // ======================
+
+    function mineTokens(uint256 amount) external onlyRole(MINTER_ROLE) nonReentrant whenNotPaused {
+        require(amount > 0, "Amount must be greater than zero");
+        require(totalSupply().add(_burnedSupply).add(amount) <= TOTAL_SUPPLY, "Exceeds total supply");
+        require(block.number > _lastMineBlock[msg.sender], "Wait for next block");
+        require(_minerContributions[msg.sender] > 0, "Insufficient contribution to mine");
+        require(block.timestamp >= _lastMineTime[msg.sender].add(MINING_COOLDOWN), "Wait before mining again");
+
+        uint256 currentBlock = block.number;
+        uint256 halvingInterval = 210_000;
+        uint256 halvingCount = currentBlock.div(halvingInterval);
+        uint256 reward = 50 * 10**18 / (2 ** halvingCount);
+        uint256 minReward = 1 * 10**17; // 0.1 SEX
+
+        reward = reward < minReward ? minReward : reward;
+
+        require(amount <= reward, "Exceeds current reward");
+        require(amount <= _maxTokensPerBlock, "Exceeds per block limit");
+        require(_totalMinedTokens.add(amount) <= MINING_SUPPLY, "Mining limit reached");
+
+        uint256 burnAmount = amount.mul(_burnRate).div(100);
+        if (burnAmount > 0) {
+            _burn(msg.sender, burnAmount);
+            _burnedSupply = _burnedSupply.add(burnAmount);
+            emit TokensBurned(msg.sender, burnAmount);
+        }
+
+        _lastMineBlock[msg.sender] = block.number;
+        _lastMineTime[msg.sender] = block.timestamp;
+        _totalMinedTokens = _totalMinedTokens.add(amount);
+        _mint(msg.sender, amount.sub(burnAmount));
+        emit TokensMined(msg.sender, amount.sub(burnAmount));
+    }
+
+    function setMaxTokensPerBlock(uint256 newMaxTokensPerBlock) external onlyRole(CONFIGURATOR_ROLE) {
+        require(newMaxTokensPerBlock > 0, "Limit must be greater than zero");
+        _maxTokensPerBlock = newMaxTokensPerBlock;
+        emit MaxTokensPerBlockUpdated(newMaxTokensPerBlock);
+    }
+
+    // ======================
+    // Vesting Functions
+    // ======================
+
+    function withdrawCreatorTokens() external nonReentrant onlyOwner {
+        require(_creatorVestingCount < CREATOR_VESTING_PERIODS, "All vesting tokens already withdrawn");
+        require(totalSupply().add(_burnedSupply).add(CREATOR_VESTING_SUPPLY) <= TOTAL_SUPPLY, "Exceeds total supply");
+        require(_creatorVestingStartTime > 0, "Vesting not started");
+
+        uint256 nextVestingTime = _creatorVestingStartTime.add((_creatorVestingCount.add(1)).mul(365 days));
+        require(
+            block.timestamp >= nextVestingTime,
+            string(abi.encodePacked("Wait ", (nextVestingTime.sub(block.timestamp)).div(1 days).toString(), " days"))
+        );
+
+        _creatorVestingCount = _creatorVestingCount.add(1);
+        _mint(msg.sender, CREATOR_VESTING_SUPPLY);
+        emit CreatorTokensWithdrawn(msg.sender, CREATOR_VESTING_SUPPLY);
+    }
+
+    // [Continuation of existing functions...]
+    // ======================
+    // Token Burning Functions
+    // ======================
+
+    function burn(uint256 amount) external nonReentrant {
+        require(amount > 0, "Amount must be greater than zero");
+        require(balanceOf(msg.sender) >= amount, "Insufficient balance");
+
+        _burn(msg.sender, amount);
+        _burnedSupply = _burnedSupply.add(amount);
+        emit TokensBurned(msg.sender, amount);
+    }
+
+    function setBurnRate(uint256 newBurnRate) external onlyRole(CONFIGURATOR_ROLE) {
+        require(newBurnRate <= MAX_BURN_RATE, "Burn rate exceeds maximum limit");
+        _burnRate = newBurnRate;
+        emit BurnRateUpdated(newBurnRate);
+    }
+
+    // ======================
+    // Upgrade Functions
+    // ======================
+
+    function approveImplementation(address newImplementation) external onlyRole(UPGRADER_ROLE) onlyValidAddress(newImplementation) onlyContract(newImplementation) {
+        _approvedImplementations[newImplementation] = true;
+        emit ImplementationApproved(newImplementation);
+    }
+
+    function requestUpgrade(address newImplementation) external onlyRole(UPGRADER_ROLE) onlyValidAddress(newImplementation) onlyContract(newImplementation) {
+        _upgradeRequestTime[newImplementation] = block.timestamp;
+        _upgradeConfirmed[newImplementation] = false;
+        emit UpgradeRequested(newImplementation, block.timestamp);
+    }
+
+    function confirmUpgrade(address newImplementation) external onlyRole(UPGRADER_ROLE) onlyValidAddress(newImplementation) {
+        require(_approvedImplementations[newImplementation], "Upgrade not authorized");
+        require(block.timestamp >= _upgradeRequestTime[newImplementation].add(_upgradeDelay), "Wait time not completed");
+        _upgradeConfirmed[newImplementation] = true;
+    }
+
+    function _authorizeUpgrade(address newImplementation) internal override onlyRole(UPGRADER_ROLE) view {
+        require(_approvedImplementations[newImplementation], "Upgrade not authorized");
+        require(_upgradeConfirmed[newImplementation], "Upgrade not confirmed");
+    }
+
+    // ======================
+    // Address Update Functions
+    // ======================
+
+    function setDevelopmentFundAddress(address newDevelopmentFundAddress) external onlyRole(CONFIGURATOR_ROLE) onlyValidAddress(newDevelopmentFundAddress) onlyContract(newDevelopmentFundAddress) {
+        _developmentFundAddress = newDevelopmentFundAddress;
+        emit ContractAddressUpdated(1, newDevelopmentFundAddress);
+    }
+
+    function setMarketingFundAddress(address newMarketingFundAddress) external onlyRole(CONFIGURATOR_ROLE) onlyValidAddress(newMarketingFundAddress) onlyContract(newMarketingFundAddress) {
+        _marketingFundAddress = newMarketingFundAddress;
+        emit ContractAddressUpdated(2, newMarketingFundAddress);
+    }
+
+    // [Other address update functions...]
+    // ======================
+    // View Functions
+    // ======================
+
+    function getBurnedSupply() external view returns (uint256) {
+        return _burnedSupply;
+    }
+
+    function getBurnRate() external view returns (uint256) {
+        return _burnRate;
+    }
+
+    function getMaxTokensPerBlock() external view returns (uint256) {
+        return _maxTokensPerBlock;
+    }
+
+    function getTotalMinedTokens() external view returns (uint256) {
+        return _totalMinedTokens;
+    }
+
+    function isInitialSupplyDistributed() external view returns (bool) {
+        return _isInitialSupplyDistributed;
+    }
+
+    function getCreatorVestingInfo() external view returns (uint256 startTime, uint256 count) {
+        return (_creatorVestingStartTime, _creatorVestingCount);
+    }
+
+    // ======================
+    // Pause Functions
+    // ======================
+
+    function pause() external onlyRole(PAUSER_ROLE) {
+        _pause();
+    }
+
+    function unpause() external onlyRole(PAUSER_ROLE) {
+        _unpause();
+    }
+}
